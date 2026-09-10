@@ -1,18 +1,12 @@
 name: CI
 
 on:
-  push:
-    branches:
-     - main
-     - next
-     - 'v*'
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional tape file selector passed to the unit tests'
+        required: false
+        default: ''
 
 # This allows a subsequently queued workflow run to interrupt previous runs
 concurrency:
@@ -26,6 +20,7 @@ jobs:
   test-regression-check-node10:
     name: Test compatibility with Node.js 10
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -40,6 +35,11 @@ jobs:
           cache-dependency-path: package.json
           check-latest: true
 
+      - name: Pin registry to the release-date time machine
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2026-05-05T08:31:31.849000Z
+
       - name: Install
         run: |
           npm install --ignore-scripts
@@ -53,13 +53,19 @@ jobs:
 
       - name: Run tests
         run: |
-          npm run test:unit
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            npx tape ${{ inputs.test-filter }}
+          else
+            npm run test:unit
+          fi
+        shell: bash
         env:
           NODE_OPTIONS: no-network-family-autoselection
 
   test-browser:
     name: Test browser compatibility
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -82,6 +88,11 @@ jobs:
           cache-dependency-path: package.json
           check-latest: true
 
+      - name: Pin registry to the release-date time machine
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2026-05-05T08:31:31.849000Z
+
       - name: Install dependencies
         run: |
           npm install --ignore-scripts
@@ -93,14 +104,78 @@ jobs:
         run: |
           npm run test:browser:${{ matrix.browser }}
 
+  # Inlined from fastify/workflows/.github/workflows/plugins-ci.yml@v6 `test` job:
+  # the reusable-workflow call cannot carry `timeout-minutes` and its `automerge`
+  # job only runs in a Dependabot PR context. Same OS x Node matrix, same
+  # install/test commands. The `quality-check` leg (lint + license-check) is a
+  # style/licence gate, not a test, so it is not carried over.
   test:
+    name: Node ${{ matrix.node-version }} on ${{ matrix.os }}
     needs:
       - test-regression-check-node10
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     permissions:
-      contents: write
-      pull-requests: write
-    uses: fastify/workflows/.github/workflows/plugins-ci.yml@v6
-    with:
-      license-check: true
-      lint: true
-      node-versions: '["16", "18", "20", "22", "24"]'
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ['macos-latest', 'ubuntu-latest', 'windows-latest']
+        node-version: ['16', '18', '20', '22', '24']
+        exclude:
+          - os: macos-latest
+            node-version: '16'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Pin registry to the release-date time machine
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2026-05-05T08:31:31.849000Z
+
+      - name: Install dependencies
+        run: npm i --ignore-scripts
+
+      - name: Run tests
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            npx tape ${{ inputs.test-filter }}
+          else
+            npm test
+          fi
+        shell: bash
+
+  # Added: upstream CI never packs the release tarball, so it is built here with
+  # the Node/npm pair that produced the published artifact and uploaded.
+  pack:
+    name: Pack npm tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Use the npm that packed the published tarball
+        run: npm i -g npm@11.13.0
+
+      - name: Pack
+        run: npm pack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: '*.tgz'
+          if-no-files-found: error
